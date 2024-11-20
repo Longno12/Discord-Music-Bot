@@ -88,8 +88,3 @@ A powerful and easy-to-use music bot for Discord with support for YouTube and Sp
 
 ## Contributing
 Feel free to fork this repository, make your changes, and submit a pull request! Contributions are welcome.
-
----
-
-## License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
