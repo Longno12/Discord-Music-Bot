@@ -103,7 +103,7 @@ This README.md file now fully reflects the bot's functionality, making it easy f
 
 ## License
 
-This project is licensed under the MIT License. See the [[LICENSE.md](./LICENSE.md)](./LICENSE) file for details.
+This project is licensed under the MIT License. See the [[LICENSE](./LICENSE.md)] file for details.
 
 
 
