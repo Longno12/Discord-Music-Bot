@@ -1,4 +1,6 @@
-MIT License
+---
+
+## MIT License
 
 Copyright (c) 2024 [Discord.gg/PillowTalk]
 
