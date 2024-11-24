@@ -1,11 +1,11 @@
 # Discord Music Bot 🎵
 
-A powerful and easy-to-use music bot for Discord with support for YouTube and Spotify links! This bot features robust functionality, a clear user interface, and optimized performance.
+A powerful and easy-to-use music bot for Discord with support for YouTube! This bot features robust functionality, a clear user interface, and optimized performance.
 
 ---
 
 ## Features
-- **🎧 Play Music**: Stream music directly from YouTube or Spotify.
+- **🎧 Play Music**: Stream music directly from YouTube
 - **📜 Queue Management**: Add, view, skip, and clear songs in the queue.
 - **⏸️ Pause/Resume**: Pause and resume playback seamlessly.
 - **🎚️ Volume Control**: Adjust playback volume.
@@ -17,14 +17,10 @@ A powerful and easy-to-use music bot for Discord with support for YouTube and Sp
 ## Commands
 | Command           | Description                                                       |
 |-------------------|-------------------------------------------------------------------|
-| `!play [URL/Term]` | Plays a song from a YouTube/Spotify link or search term.          |
-| `!pause`          | Pauses the current song.                                          |
-| `!resume`         | Resumes the paused song.                                          |
+| `!play [URL/Term]`| Plays a song from a YouTube/Spotify link or search term.          |
 | `!skip`           | Skips the current song in the queue.                              |
 | `!queue`          | Displays the current song queue.                                  |
-| `!clear`          | Clears the entire song queue and stops the bot.                   |
-| `!stop`           | Disconnects the bot from the voice channel.                       |
-| `!volume [1-100]` | Adjusts the volume of the bot. Default is 50%.                    |
+| `!leave`          | Disconnects the bot from the voice channel.                       |
 
 ---
 
@@ -32,7 +28,6 @@ A powerful and easy-to-use music bot for Discord with support for YouTube and Sp
 - **Python 3.8+**: Make sure Python is installed on your system.
 - **FFmpeg**: Install FFmpeg and add it to your system's `PATH`.
 - **Discord Bot Token**: Get your bot token from the [Discord Developer Portal](https://discord.com/developers/applications).
-- **Spotify API Credentials**: Get a `CLIENT_ID` and `CLIENT_SECRET` from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/).
 
 ---
 
@@ -49,15 +44,11 @@ A powerful and easy-to-use music bot for Discord with support for YouTube and Sp
    ```
 
 3. **Configure Spotify API**
-   - Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/) and create an application.
-   - Copy your `CLIENT_ID` and `CLIENT_SECRET`.
-   - Replace the placeholders in the bot code with your credentials:
-     ```python
-     SPOTIFY_CLIENT_ID = "your_client_id"
-     SPOTIFY_CLIENT_SECRET = "your_client_secret"
-     ```
+- Coming Soon
 
-4. **Add Your Discord Bot Token**
+
+
+5. **Add Your Discord Bot Token**
    - Go to the [Discord Developer Portal](https://discord.com/developers/applications).
    - Create an application and copy the bot token.
    - Replace the placeholder in the bot code with your token:
@@ -65,7 +56,7 @@ A powerful and easy-to-use music bot for Discord with support for YouTube and Sp
      bot.run('your_bot_token')
      ```
 
-5. **Run the Bot**
+6. **Run the Bot**
    ```bash
    python bot.py
    ```
@@ -82,7 +73,6 @@ A powerful and easy-to-use music bot for Discord with support for YouTube and Sp
 ## Troubleshooting
 - **FFmpeg Not Found**: Ensure FFmpeg is installed and added to your system's `PATH`.
 - **Bot Not Joining Voice Channel**: Make sure you’re in a voice channel and have the proper permissions.
-- **Spotify Errors**: Ensure your Spotify API credentials are correctly configured.
 
 ---
 
