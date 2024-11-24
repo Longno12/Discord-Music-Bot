@@ -47,7 +47,7 @@ A powerful and easy-to-use music bot for Discord with support for YouTube! This 
 
 1. **Clone the Repository**
    ```bash
-   git clone https://github.com/yourusername/discord-music-bot.git
+   git clone https://github.com/Longno12/discord-music-bot.git
    cd discord-music-bot
 
 
