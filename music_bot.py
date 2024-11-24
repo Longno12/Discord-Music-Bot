@@ -2,112 +2,104 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-
-# Spotify API Setup (replace these with your own credentials securely)
-SPOTIFY_CLIENT_ID = "YOUR_SPOTIFY_CLIENT_ID"
-SPOTIFY_CLIENT_SECRET = "YOUR_SPOTIFY_CLIENT_SECRET"
-spotify = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=SPOTIFY_CLIENT_ID,
-    client_secret=SPOTIFY_CLIENT_SECRET
-))
-
 
 intents = discord.Intents.default()
+intents.messages = True
 intents.message_content = True
+intents.guilds = True
+intents.voice_states = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'mp3',
-        'preferredquality': '192',
-    }],
-    'quiet': True,
-    'default_search': 'ytsearch'
-}
-
-ffmpeg_options = {
-    'options': '-vn'
-}
-
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
-
-
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-
-    @classmethod
-    async def from_url(cls, url, *, loop=None):
-        loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-        if 'entries' in data:
-            data = data['entries'][0]
-        filename = data['url']
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
-
-
-def get_track_name_from_spotify(url):
-    """Fetches the track name and artist from a Spotify link."""
-    try:
-        track_info = spotify.track(url)
-        track_name = track_info['name']
-        artist_name = track_info['artists'][0]['name']
-        return f"{track_name} by {artist_name}"
-    except Exception as e:
-        print(f"Spotify API Error: {e}")
-        return None
-
+song_queues = {}
 
 @bot.event
 async def on_ready():
-    print(f"Bot connected as {bot.user}")
+    print(f"Logged in as {bot.user.name}")
 
+@bot.command(name="join")
+async def join(ctx):
+    if ctx.author.voice:
+        channel = ctx.author.voice.channel
+        await channel.connect()
+    else:
+        await ctx.send("You need to be in a voice channel for me to join!")
 
-@bot.command(name="play", help="Plays a song from a URL or search term.")
+async def play_next(ctx):
+    """Plays the next song in the queue."""
+    guild_id = ctx.guild.id
+    if guild_id in song_queues and song_queues[guild_id]:
+        next_song = song_queues[guild_id].pop(0)
+        try:
+            ydl_opts = {'format': 'bestaudio/best', 'quiet': True}
+            search_query = next_song['query']
+            if not search_query.startswith("http"):
+                search_query = f"ytsearch:{search_query}"
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(search_query, download=False)
+                if 'entries' in info:
+                    info = info['entries'][0]
+                audio_url = info['url']
+
+            ffmpeg_options = {
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                'options': '-vn',
+            }
+            vc = ctx.voice_client
+            vc.play(
+                discord.FFmpegPCMAudio(audio_url, **ffmpeg_options),
+                after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
+            )
+            await ctx.send(f"Now playing: {info.get('title', 'Unknown Title')}")
+        except Exception as e:
+            await ctx.send(f"Error playing the track: {str(e)}")
+            await play_next(ctx)
+    else:
+        await ctx.send("Queue is empty. Waiting for more songs to be added...")
+
+@bot.command(name="play", aliases=["p"])
 async def play(ctx, *, query):
     if not ctx.voice_client:
-        if ctx.author.voice:
-            await ctx.author.voice.channel.connect()
-        else:
-            await ctx.send("You need to be in a voice channel to play music.")
-            return
+        await ctx.send("I'm not connected to a voice channel! Use `!join` first.")
+        return
 
-    async with ctx.typing():
-        try:
-            if "spotify.com/track" in query:
-                song_name = get_track_name_from_spotify(query)
-                if not song_name:
-                    await ctx.send("Failed to fetch track information from Spotify.")
-                    return
-                query = song_name
+    guild_id = ctx.guild.id
+    if guild_id not in song_queues:
+        song_queues[guild_id] = []
 
-            player = await YTDLSource.from_url(query, loop=bot.loop)
-            ctx.voice_client.stop()
-            def after_play(error):
-                if error:
-                    print(f"Error during playback: {error}")
-                else:
-                    print("Song playback finished.")
-            ctx.voice_client.play(player, after=after_play)
-            await ctx.send(f"Now playing: {player.title}")
-        except Exception as e:
-            await ctx.send(f"Error: {str(e)}")
+    song_queues[guild_id].append({'query': query, 'requester': ctx.author.name})
+    await ctx.send(f"Added to queue: {query}")
 
+    if not ctx.voice_client.is_playing() and len(song_queues[guild_id]) == 1:
+        await play_next(ctx)
 
-@bot.command(name="stop", help="Stops and disconnects the bot.")
-async def stop(ctx):
-    if ctx.voice_client:
-        await ctx.voice_client.disconnect()
-        await ctx.send("Disconnected.")
+@bot.command(name="queue")
+async def show_queue(ctx):
+    guild_id = ctx.guild.id
+    if guild_id in song_queues and song_queues[guild_id]:
+        queue_list = "\n".join(
+            [f"{i+1}. {song['query']} (requested by {song['requester']})" for i, song in enumerate(song_queues[guild_id])]
+        )
+        await ctx.send(f"Current queue:\n{queue_list}")
     else:
-        await ctx.send("I'm not connected to a voice channel.")
+        await ctx.send("The queue is empty!")
 
-bot.run('YOUR_DISCORD_BOT_TOKEN')
+@bot.command(name="skip")
+async def skip(ctx):
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.stop()
+        await ctx.send("Skipping to the next song...")
+    else:
+        await ctx.send("No song is currently playing.")
+
+@bot.command(name="leave")
+async def leave(ctx):
+    if ctx.voice_client:
+        song_queues.pop(ctx.guild.id, None)
+        await ctx.voice_client.disconnect()
+        await ctx.send("Disconnected from the voice channel!")
+    else:
+        await ctx.send("I'm not connected to a voice channel!")
+
+bot.run("BOT-TOKEN")
