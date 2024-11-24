@@ -88,10 +88,22 @@ A powerful and easy-to-use music bot for Discord with support for YouTube! This 
 ## Contributing
 Feel free to fork this repository, make your changes, and submit a pull request! Contributions are welcome.
 
-Key Updates:
-Features: Added features like playlist support, shuffle, loop, volume control, and lyrics fetching.
-Commands Table: Updated the commands section to include all available commands such as `!play`, `!pause`, `!shuffle`, `!loop`, etc.
-Installation: Clear installation steps for the bot, with a section for adding your Discord Bot token.
-Usage: Detailed usage of the bot, including how to invite it, play music, and control playback.
+## Contributing
+Feel free to fork this repository, make your changes, and submit a pull request! Contributions are welcome.
+
+### Key Updates:
+- **Features**: Added features like playlist support, shuffle, loop, volume control, and lyrics fetching.
+- **Commands Table**: Updated the commands section to include all available commands such as `!play`, `!pause`, `!shuffle`, `!loop`, etc.
+- **Installation**: Clear installation steps for the bot, with a section for adding your Discord Bot token.
+- **Usage**: Detailed usage of the bot, including how to invite it, play music, and control playback.
+
 This README.md file now fully reflects the bot's functionality, making it easy for users to understand, install, and contribute to the project.
+
+---
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
+
+
 
