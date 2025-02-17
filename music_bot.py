@@ -2,236 +2,408 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
-import requests
+import random
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import json
+import lyricsgenius
 
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
-intents.guilds = True
-intents.voice_states = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Global queue dictionary to store queues for different guilds
 song_queues = {}
-current_loop = {}  # Tracks loop states for songs
-volume_levels = {}  # Tracks volume for each guild (default is 1.0)
+volume_levels = {}
+loop_status = {}
+skip_votes = {}
+FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+
+ydl_opts = {
+    'format': 'bestaudio/best',
+    'extract_flat': 'in_playlist',
+}
+
+VERSION = "1.6.0"
+PREVIOUS_VERSION = "1.5.2"
+SPOTIPY_CLIENT_ID = 'SPOTIPY_CLIENT_ID'
+SPOTIPY_CLIENT_SECRET = 'SPOTIPY_CLIENT_SECRET'
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET))
+
+# Initialize Genius API client
+genius = lyricsgenius.Genius("YOUR_GENIUS_API_TOKEN")
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name}")
+    print(f'{bot.user} has connected to Discord!')
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!commands"))
+
+class YTDLSource(discord.PCMVolumeTransformer):
+    def __init__(self, source, *, data, volume=0.5):
+        super().__init__(source, volume)
+        self.data = data
+        self.title = data.get('title')
+        self.url = data.get('url')
+        self.duration = data.get('duration')
+
+    @classmethod
+    async def from_url(cls, url, *, loop=None):
+        loop = loop or asyncio.get_event_loop()
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            data = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+        
+        if 'entries' in data:
+            # It's a playlist
+            playlist_urls = [entry['url'] for entry in data['entries'] if entry.get('url')]
+            return playlist_urls
+        else:
+            # It's a single video
+            return cls(discord.FFmpegPCMAudio(data['url'], **FFMPEG_OPTIONS), data=data)
+
+async def update_presence(ctx, song_title):
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=song_title))
 
 async def play_next(ctx):
-    """Plays the next song in the queue."""
-    guild_id = ctx.guild.id
-    if guild_id in current_loop and current_loop[guild_id] == "single":
-        # Replay the current song
-        current_song = song_queues[guild_id][0]
-        await play_song(ctx, current_song['query'])
-    elif guild_id in song_queues and song_queues[guild_id]:
-        next_song = song_queues[guild_id].pop(0)
-        await play_song(ctx, next_song['query'])
-    elif guild_id in current_loop and current_loop[guild_id] == "queue" and song_queues.get(guild_id):
-        # Refill the queue for queue looping
-        song_queues[guild_id] = song_queues[guild_id] * 1
-        next_song = song_queues[guild_id].pop(0)
-        await play_song(ctx, next_song['query'])
+    if ctx.guild.id in loop_status:
+        if loop_status[ctx.guild.id] == "song" and ctx.voice_client.source:
+            await play_song(ctx, ctx.voice_client.source.url)
+            return
+        elif loop_status[ctx.guild.id] == "queue" and ctx.guild.id in song_queues and song_queues[ctx.guild.id]:
+            song_queues[ctx.guild.id].append(song_queues[ctx.guild.id].pop(0))
+
+    if ctx.guild.id in song_queues and song_queues[ctx.guild.id]:
+        query = song_queues[ctx.guild.id].pop(0)
+        await play_song(ctx, query)
     else:
-        await ctx.send("Queue is empty. Waiting for more songs to be added...")
+        await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!commands"))
 
 async def play_song(ctx, query):
-    """Helper to play a song."""
     try:
-        ydl_opts = {'format': 'bestaudio/best', 'quiet': True}
-        search_query = query if query.startswith("http") else f"ytsearch:{query}"
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_query, download=False)
-            if 'entries' in info:
-                info = info['entries'][0]
-            audio_url = info['url']
-
-        ffmpeg_options = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-            'options': f'-vn -filter:a "volume={volume_levels.get(ctx.guild.id, 1.0)}"',
-        }
-        vc = ctx.voice_client
-        vc.play(
-            discord.FFmpegPCMAudio(audio_url, **ffmpeg_options),
-            after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
-        )
-        await ctx.send(f"Now playing: {info.get('title', 'Unknown Title')}")
-    except Exception as e:
-        await ctx.send(f"Error playing the track: {str(e)}")
-
-@bot.command(name="play", aliases=["p"])
-async def play(ctx, *, query):
-    # Ensure the bot is in the same voice channel as the user
-    if not ctx.voice_client:
-        if ctx.author.voice:
-            channel = ctx.author.voice.channel
-            await channel.connect()
-        else:
-            await ctx.send("You need to be in a voice channel for me to play music!")
-            return
-
-    guild_id = ctx.guild.id
-    if guild_id not in song_queues:
-        song_queues[guild_id] = []
-
-    try:
-        ydl_opts = {'format': 'bestaudio/best', 'quiet': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
-
-            # Check if it's a playlist
-            if 'entries' in info:
-                for entry in info['entries']:
-                    song_queues[guild_id].append({'query': entry['url'], 'requester': ctx.author.name})
-                await ctx.send(f"Added playlist to queue: {info['title']} ({len(info['entries'])} songs)")
+        async with ctx.typing():
+            result = await YTDLSource.from_url(query, loop=bot.loop)
+            if isinstance(result, list):
+                song_queues[ctx.guild.id].extend(result)
+                await ctx.send(f"Added {len(result)} songs from playlist to the queue.")
+                if not ctx.voice_client.is_playing():
+                    await play_next(ctx)
             else:
-                song_queues[guild_id].append({'query': query, 'requester': ctx.author.name})
-                await ctx.send(f"Added to queue: {info['title']}")
+                player = result
+                ctx.voice_client.play(player, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop))       
+                await update_presence(ctx, player.title)
+                duration_str = f"{player.duration // 60}:{player.duration % 60:02d}" if player.duration else "Unknown"
+                thumbnail = player.data.get('thumbnail')
+                embed = discord.Embed(color=0x1DB954)
+                embed.title = "🎵 Now Playing"
+                embed.description = f"**[{player.title}]({player.url})**"
+                if thumbnail:
+                    embed.set_thumbnail(url=thumbnail)
+                embed.add_field(name="Duration", value=f"`{duration_str}`", inline=True)
+                embed.add_field(name="Queue", value=f"`{len(song_queues.get(ctx.guild.id, []))} songs`", inline=True)
+                embed.add_field(name="Volume", value=f"`{int(volume_levels.get(ctx.guild.id, 1.0) * 100)}%`", inline=True)
+                embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
 
-        if not ctx.voice_client.is_playing() and len(song_queues[guild_id]) == 1:
-            await play_next(ctx)
+                await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send(f"Error adding the track: {str(e)}")
+        await ctx.send(f"An error occurred: {str(e)}")
+        if ctx.guild.id in song_queues and song_queues[ctx.guild.id]:
+            song_queues[ctx.guild.id].pop(0)
+        await play_next(ctx)
 
-@bot.command(name="lyrics")
-async def lyrics(ctx):
-    """Fetch and display lyrics for the currently playing song."""
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        guild_id = ctx.guild.id
-        if guild_id in song_queues and song_queues[guild_id]:
-            current_song = song_queues[guild_id][0]['query']
-            search_query = f"{current_song} lyrics"
+async def get_spotify_track(url):
+    try:
+        track_id = url.split('/')[-1].split('?')[0]
+        track_info = sp.track(track_id)
+        query = f"{track_info['name']} {' '.join([artist['name'] for artist in track_info['artists']])}"
+        return query
+    except Exception as e:
+        print(f"Error processing Spotify URL: {e}")
+        return None
 
-            try:
-                response = requests.get(f"https://api.lyrics.ovh/v1/artist/{search_query}")
-                response_data = response.json()
-                if "lyrics" in response_data:
-                    lyrics_text = response_data['lyrics']
-                    if len(lyrics_text) > 2000:
-                        lyrics_text = lyrics_text[:1997] + "..."
-                    await ctx.send(f"Lyrics for **{current_song}**:\n```{lyrics_text}```")
-                else:
-                    await ctx.send(f"No lyrics found for **{current_song}**.")
-            except Exception as e:
-                await ctx.send(f"Error fetching lyrics: {str(e)}")
-        else:
-            await ctx.send("No song is currently playing!")
+async def get_spotify_playlist(url):
+    try:
+        playlist_id = url.split('/')[-1].split('?')[0]
+        results = sp.playlist_tracks(playlist_id)
+        tracks = results['items']
+        while results['next']:
+            results = sp.next(results)
+            tracks.extend(results['items'])
+        
+        queries = []
+        for item in tracks:
+            track = item['track']
+            query = f"{track['name']} {' '.join([artist['name'] for artist in track['artists']])}"
+            queries.append(query)
+        return queries
+    except Exception as e:
+        print(f"Error processing Spotify playlist URL: {e}")
+        return None
+
+async def get_spotify_album(url):
+    try:
+        album_id = url.split('/')[-1].split('?')[0]
+        results = sp.album_tracks(album_id)
+        tracks = results['items']
+        while results['next']:
+            results = sp.next(results)
+            tracks.extend(results['items'])
+
+        queries = []
+        for track in tracks:
+            query = f"{track['name']} {' '.join([artist['name'] for artist in track['artists']])}"
+            queries.append(query)
+        return queries
+    except Exception as e:
+        print(f"Error processing Spotify album URL: {e}")
+        return None
+
+@bot.command(name='join', help='Tells the bot to join the voice channel')
+async def join(ctx):
+    if not ctx.message.author.voice:
+        await ctx.send("You are not connected to a voice channel")
+        return
+    
+    channel = ctx.message.author.voice.channel
+    await channel.connect()
+
+@bot.command(name='play', aliases=['p'], help='To play a song or add it to the queue (supports song names, YouTube links, and Spotify links)')
+async def play(ctx, *, query):
+    if not ctx.voice_client:
+        await ctx.invoke(bot.get_command('join'))
+
+    if ctx.guild.id not in song_queues:
+        song_queues[ctx.guild.id] = []
+
+    if 'open.spotify.com/track' in query:
+        query = await get_spotify_track(query)
+        if not query:
+            await ctx.send("Failed to process Spotify track. Please try a different link or search query.")
+            return
+    elif 'open.spotify.com/playlist' in query:
+        playlist_queries = await get_spotify_playlist(query)
+        if not playlist_queries:
+            await ctx.send("Failed to process Spotify playlist. Please try a different link or search query.")
+            return
+        song_queues[ctx.guild.id].extend(playlist_queries)
+        await ctx.send(f"Added {len(playlist_queries)} songs from Spotify playlist to the queue.")
+        if not ctx.voice_client.is_playing():
+            await play_next(ctx)
+        return
+    elif 'open.spotify.com/album' in query:
+        album_queries = await get_spotify_album(query)
+        if not album_queries:
+            await ctx.send("Failed to process Spotify album. Please try a different link or search query.")
+            return
+        song_queues[ctx.guild.id].extend(album_queries)
+        await ctx.send(f"Added {len(album_queries)} songs from Spotify album to the queue.")
+        if not ctx.voice_client.is_playing():
+            await play_next(ctx)
+        return
+
+    if not query.startswith("http"):
+        query = f"ytsearch:{query}"
+
+    song_queues[ctx.guild.id].append(query)
+
+    if not ctx.voice_client.is_playing():
+        await play_next(ctx)
     else:
-        await ctx.send("No song is currently playing!")
+        await ctx.send(f"Added to queue: {query}")
 
-@bot.command(name="queue")
-async def show_queue(ctx):
-    guild_id = ctx.guild.id
-    if guild_id in song_queues and song_queues[guild_id]:
-        queue_list = "\n".join(
-            [f"{i+1}. {song['query']} (requested by {song['requester']})" for i, song in enumerate(song_queues[guild_id])]
-        )
-        await ctx.send(f"Current queue:\n{queue_list}")
-    else:
-        await ctx.send("The queue is empty!")
-
-@bot.command(name="volume")
-async def volume(ctx, level: float):
-    """Adjust playback volume."""
-    if ctx.voice_client and 0.0 <= level <= 2.0:
-        volume_levels[ctx.guild.id] = level
-        await ctx.send(f"Volume set to {level * 100}%")
-    else:
-        await ctx.send("Please specify a volume level between 0.0 and 2.0.")
-
-@bot.command(name="pause")
-async def pause(ctx):
-    """Pause the current track."""
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.pause()
-        await ctx.send("Playback paused.")
-    else:
-        await ctx.send("Nothing is currently playing.")
-
-@bot.command(name="resume")
-async def resume(ctx):
-    """Resume the paused track."""
-    if ctx.voice_client and ctx.voice_client.is_paused():
-        ctx.voice_client.resume()
-        await ctx.send("Playback resumed.")
-    else:
-        await ctx.send("No track is paused.")
-
-@bot.command(name="shuffle")
-async def shuffle(ctx):
-    """Shuffle the queue."""
-    guild_id = ctx.guild.id
-    if guild_id in song_queues and len(song_queues[guild_id]) > 1:
-        from random import shuffle
-        shuffle(song_queues[guild_id])
-        await ctx.send("Queue shuffled!")
-    else:
-        await ctx.send("The queue is empty or has only one song.")
-
-@bot.command(name="loop")
-async def loop(ctx):
-    """Loop the current song."""
-    current_loop[ctx.guild.id] = "single"
-    await ctx.send("Looping the current song.")
-
-@bot.command(name="loopqueue")
-async def loopqueue(ctx):
-    """Loop the entire queue."""
-    current_loop[ctx.guild.id] = "queue"
-    await ctx.send("Looping the entire queue.")
-
-@bot.command(name="remove")
-async def remove(ctx, index: int):
-    """Remove a song from the queue."""
-    guild_id = ctx.guild.id
-    if guild_id in song_queues and 1 <= index <= len(song_queues[guild_id]):
-        removed_song = song_queues[guild_id].pop(index - 1)
-        await ctx.send(f"Removed {removed_song['query']} from the queue.")
-    else:
-        await ctx.send("Invalid index or the queue is empty.")
-
-@bot.command(name="clearqueue")
-async def clearqueue(ctx):
-    """Clear the current queue."""
-    guild_id = ctx.guild.id
-    song_queues.pop(guild_id, None)
-    await ctx.send("The queue has been cleared.")
-
-@bot.command(name="leave")
-async def leave(ctx):
-    """Disconnect the bot from the voice channel."""
+@bot.command(name='stop', help='Stops the music and clears the queue')
+async def stop(ctx):
     if ctx.voice_client:
-        song_queues.pop(ctx.guild.id, None)
-        await ctx.voice_client.disconnect()
-        await ctx.send("Disconnected from the voice channel!")
+        ctx.voice_client.stop()
+    if ctx.guild.id in song_queues:
+        song_queues[ctx.guild.id].clear()
+    await ctx.send("Stopped the music and cleared the queue.")
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!commands"))
+
+@bot.command(name='queue', aliases=['q'], help='Shows the current queue')
+async def queue(ctx):
+    if ctx.guild.id not in song_queues or not song_queues[ctx.guild.id]:
+        await ctx.send("The queue is empty.")
+        return
+
+    queue_list = "\n".join([f"{i+1}. {song}" for i, song in enumerate(song_queues[ctx.guild.id])])
+    await ctx.send(f"Current queue:\n{queue_list}")
+
+@bot.command(name='skip', help='Skips the current song')
+async def skip(ctx):
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.stop()
+        await ctx.send("Skipped the current song.")
     else:
-        await ctx.send("I'm not connected to a voice channel!")
+        await ctx.send("No song is currently playing.")
 
-@bot.command(name="commands")
-async def commands(ctx):
-    """Show help message to the user who requested it."""
-    help_message = (
-        "**Music Bot Commands:**\n"
-        "`!play <song>` or `!p <song>`: Play a song or add it to the queue.\n"
-        "`!queue`: Show the current queue.\n"
-        "`!volume <level>`: Adjust volume (0.0 to 2.0).\n"
-        "`!pause`: Pause the current song.\n"
-        "`!resume`: Resume the paused song.\n"
-        "`!shuffle`: Shuffle the queue.\n"
-        "`!loop`: Loop the current song.\n"
-        "`!loopqueue`: Loop the entire queue.\n"
-        "`!lyrics`: Fetch and display lyrics of the current song.\n"
-        "`!remove <index>`: Remove a song from the queue.\n"
-        "`!clearqueue`: Clear the queue.\n"
-        "`!leave`: Disconnect the bot."
-    )
-    await ctx.author.send(help_message)
-    await ctx.send("Check your DMs for the list of commands! 📩")
+@bot.command(name='commands', help='Shows all available commands')
+async def show_commands(ctx):
+    embed = discord.Embed(title="Music Bot Commands", color=0x1DB954)
+    embed.set_footer(text=f"Bot version: {VERSION}")
+    
+    for command in bot.commands:
+        embed.add_field(name=f"!{command.name}", value=command.help, inline=False)
+    
+    await ctx.send(embed=embed)
 
+@bot.command(name='update', help='Shows what got updated/added in the latest version')
+async def update(ctx):
+    embed = discord.Embed(title="Latest Update", color=0x1DB954)
+    embed.add_field(name="Current Version", value=VERSION, inline=False)
+    embed.add_field(name="Previous Version", value=PREVIOUS_VERSION, inline=False)
+    embed.add_field(name="What's New", value="""    
+    1. Added lyrics command to fetch song lyrics.
+    2. Implemented a song recommendation system.
+    3. Added save_playlist and load_playlist commands.
+    4. Introduced volume control with !volume command.
+    5. Added loop functionality for songs and queue.
+    6. New nowplaying command to show current song info.
+    7. Implemented a voting system for skipping songs.
+    8. Added remove command to remove specific songs from the queue.
+    9. General improvements and bug fixes.
+    """, inline=False)
 
-bot.run("DISCORD-TOKEN-HERE")
+    await ctx.send(embed=embed)
+
+@bot.command(name='shuffle', help='Shuffles the current queue')
+async def shuffle(ctx):
+    if ctx.guild.id not in song_queues or not song_queues[ctx.guild.id]:
+        await ctx.send("The queue is empty. Nothing to shuffle.")
+        return
+    
+    random.shuffle(song_queues[ctx.guild.id])
+    await ctx.send("The queue has been shuffled!")
+
+@bot.command(name='lyrics', help='Fetches lyrics for the currently playing song')
+async def lyrics(ctx):
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        current_song = ctx.voice_client.source.title
+        song = genius.search_song(current_song)
+        if song:
+            await ctx.send(f"Lyrics for {current_song}:\n\n{song.lyrics[:2000]}...")
+        else:
+            await ctx.send(f"Couldn't find lyrics for {current_song}")
+    else:
+        await ctx.send("No song is currently playing.")
+
+@bot.command(name='recommend', help='Recommends a song based on the current playlist')
+async def recommend(ctx):
+    if ctx.guild.id in song_queues and song_queues[ctx.guild.id]:
+        sample_song = random.choice(song_queues[ctx.guild.id])
+        search_response = await YTDLSource.from_url(f"ytsearch:{sample_song}", loop=bot.loop)
+        if isinstance(search_response, YTDLSource):
+            await ctx.send(f"Based on your queue, you might like: {search_response.title}\n{search_response.url}")
+        else:
+            await ctx.send("Couldn't find a recommendation at this time.")
+    else:
+        await ctx.send("The queue is empty. Add some songs to get recommendations!")
+
+@bot.command(name='save_playlist', help='Saves the current queue as a playlist')
+async def save_playlist(ctx, name: str):
+    if ctx.guild.id in song_queues and song_queues[ctx.guild.id]:
+        playlists = {}
+        try:
+            with open('playlists.json', 'r') as f:
+                playlists = json.load(f)
+        except FileNotFoundError:
+            pass
+        
+        playlists[name] = song_queues[ctx.guild.id]
+        
+        with open('playlists.json', 'w') as f:
+            json.dump(playlists, f)
+        
+        await ctx.send(f"Playlist '{name}' has been saved!")
+    else:
+        await ctx.send("The queue is empty. Nothing to save.")
+
+@bot.command(name='load_playlist', help='Loads a saved playlist')
+async def load_playlist(ctx, name: str):
+    try:
+        with open('playlists.json', 'r') as f:
+            playlists = json.load(f)
+        
+        if name in playlists:
+            if ctx.guild.id not in song_queues:
+                song_queues[ctx.guild.id] = []
+            song_queues[ctx.guild.id].extend(playlists[name])
+            await ctx.send(f"Playlist '{name}' has been loaded and added to the queue!")
+        else:
+            await ctx.send(f"Playlist '{name}' not found.")
+    except FileNotFoundError:
+        await ctx.send("No playlists have been saved yet.")
+
+@bot.command(name='volume', aliases=['vol'], help='Adjusts the volume of the bot (0-100)')
+async def volume(ctx, volume: int):
+    if ctx.voice_client is None:
+        return await ctx.send("Not connected to a voice channel.")
+
+    if 0 <= volume <= 100:
+        ctx.voice_client.source.volume = volume / 100
+        volume_levels[ctx.guild.id] = volume / 100
+        await ctx.send(f"Changed volume to {volume}%")
+    else:
+        await ctx.send("Volume must be between 0 and 100.")
+
+@bot.command(name='loop', help='Toggles loop mode (off/song/queue)')
+async def loop(ctx, mode: str = None):
+    if ctx.guild.id not in loop_status:
+        loop_status[ctx.guild.id] = "off"
+
+    if mode is None:
+        current_mode = loop_status[ctx.guild.id]
+        await ctx.send(f"Current loop mode: {current_mode}")
+    elif mode.lower() in ["off", "song", "queue"]:
+        loop_status[ctx.guild.id] = mode.lower()
+        await ctx.send(f"Loop mode set to: {mode.lower()}")
+    else:
+        await ctx.send("Invalid loop mode. Use 'off', 'song', or 'queue'.")
+
+@bot.command(name='nowplaying', aliases=['np'], help='Shows information about the currently playing song')
+async def nowplaying(ctx):
+    if ctx.voice_client and ctx.voice_client.source:
+        player = ctx.voice_client.source
+        duration_str = f"{player.duration // 60}:{player.duration % 60:02d}" if player.duration else "Unknown"
+        
+        embed = discord.Embed(color=0x1DB954)
+        embed.title = "🎵 Now Playing"
+        embed.description = f"**[{player.title}]({player.url})**"
+        if player.data.get('thumbnail'):
+            embed.set_thumbnail(url=player.data['thumbnail'])
+        embed.add_field(name="Duration", value=f"`{duration_str}`", inline=True)
+        embed.add_field(name="Requested by", value=ctx.voice_client.source.requester.mention if hasattr(ctx.voice_client.source, 'requester') else "Unknown", inline=True)
+        
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send("No song is currently playing.")
+
+@bot.command(name='voteskip', help='Vote to skip the current song')
+async def voteskip(ctx):
+    if not ctx.voice_client or not ctx.voice_client.is_playing():
+        return await ctx.send("No song is currently playing.")
+
+    if ctx.guild.id not in skip_votes:
+        skip_votes[ctx.guild.id] = set()
+
+    skip_votes[ctx.guild.id].add(ctx.author.id)
+    required_votes = len(ctx.voice_client.channel.members) // 2
+    current_votes = len(skip_votes[ctx.guild.id])
+
+    if current_votes >= required_votes:
+        await ctx.invoke(bot.get_command('skip'))
+        skip_votes[ctx.guild.id].clear()
+    else:
+        await ctx.send(f"Vote to skip added. {current_votes}/{required_votes} votes required to skip.")
+
+@bot.command(name='remove', help='Removes a song from the queue by its position')
+async def remove(ctx, position: int):
+    if ctx.guild.id not in song_queues or not song_queues[ctx.guild.id]:
+        return await ctx.send("The queue is empty.")
+
+    if 1 <= position <= len(song_queues[ctx.guild.id]):
+        removed_song = song_queues[ctx.guild.id].pop(position - 1)
+        await ctx.send(f"Removed song from position {position}: {removed_song}")
+    else:
+        await ctx.send("Invalid position. Please provide a valid queue position.")
+
+bot.run("Discord Bot Token")
+
